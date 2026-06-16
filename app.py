@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 LexTimeline — Painel de Tramitação Legislativa
-Versão 2.1: metodologia estrita baseada na seção oficial "Tramitação" da ficha da Câmara.
+Versão 2.2: metodologia estrita baseada na seção oficial "Tramitação" da ficha da Câmara, com correção de resposta JSON da API.
 
 Desenvolvido para uso em Streamlit Community Cloud.
 """
@@ -9,6 +9,7 @@ Desenvolvido para uso em Streamlit Community Cloud.
 from __future__ import annotations
 
 import html
+import json
 import re
 import textwrap
 import unicodedata
@@ -30,8 +31,14 @@ st.set_page_config(
 CAMARA_API = "https://dadosabertos.camara.leg.br/api/v2"
 FICHA_URL = "https://www.camara.leg.br/proposicoesWeb/fichadetramitacao?idProposicao={id}"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/2.1; +https://github.com/GPE-CD/LexTimeline)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/2.2; +https://github.com/GPE-CD/LexTimeline)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.7",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.7",
+}
+
+API_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/2.2; +https://github.com/GPE-CD/LexTimeline)",
+    "Accept": "application/json",
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.7",
 }
 
@@ -152,6 +159,30 @@ def safe_get(url: str, *, params: Optional[dict] = None, timeout: int = 30) -> r
     return resp
 
 
+def safe_get_api_json(url: str, *, params: Optional[dict] = None, timeout: int = 30) -> dict:
+    """Request JSON from Dados Abertos without assuming the response is JSON.
+
+    The earlier app used the same Accept header for HTML and API calls. In some
+    deployments this may cause an empty or non-JSON response, leading to the
+    error: "Expecting value: line 1 column 1 (char 0)". This function requests
+    JSON explicitly and raises an explanatory error if the body is not JSON.
+    """
+    resp = requests.get(url, params=params, headers=API_HEADERS, timeout=timeout)
+    resp.raise_for_status()
+    body = (resp.text or "").strip()
+    if not body:
+        raise ValueError("A API dos Dados Abertos retornou resposta vazia ao localizar a proposição.")
+    ctype = (resp.headers.get("content-type") or "").lower()
+    try:
+        return resp.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        preview = body[:180].replace("\n", " ")
+        raise ValueError(
+            "A API dos Dados Abertos não retornou JSON ao localizar a proposição. "
+            f"Content-Type: {ctype or 'não informado'}. Prévia da resposta: {preview!r}"
+        ) from exc
+
+
 def parse_pl_input(value: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Return (numero, ano, idProposicao). Accepts PL n/ano, n/ano, URL or raw id."""
     value = (value or "").strip()
@@ -170,10 +201,14 @@ def parse_pl_input(value: str) -> Tuple[Optional[str], Optional[str], Optional[s
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def find_id_proposicao(numero: str, ano: str) -> Tuple[str, str]:
-    """Find proposition id using Dados Abertos. Uses API only to locate the official ficha."""
+    """Find proposition id using Dados Abertos. Uses API only to locate the official ficha.
+
+    The analytical data still comes from the official ficha de tramitação. The API
+    is used only as a locator.
+    """
     params = {"siglaTipo": "PL", "numero": numero, "ano": ano, "itens": 10, "ordem": "ASC"}
-    resp = safe_get(f"{CAMARA_API}/proposicoes", params=params)
-    data = resp.json().get("dados", [])
+    payload = safe_get_api_json(f"{CAMARA_API}/proposicoes", params=params)
+    data = payload.get("dados", []) if isinstance(payload, dict) else []
     if not data:
         raise ValueError(f"Não encontrei PL {numero}/{ano} nos Dados Abertos da Câmara.")
     # Prefer exact sigla/numero/ano match.
