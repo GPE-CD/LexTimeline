@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 LexTimeline — Painel de Tramitação Legislativa
-Versão 2: metodologia estrita baseada na seção oficial "Tramitação" da ficha da Câmara.
+Versão 2.1: metodologia estrita baseada na seção oficial "Tramitação" da ficha da Câmara.
 
 Desenvolvido para uso em Streamlit Community Cloud.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import re
 import textwrap
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -29,8 +30,9 @@ st.set_page_config(
 CAMARA_API = "https://dadosabertos.camara.leg.br/api/v2"
 FICHA_URL = "https://www.camara.leg.br/proposicoesWeb/fichadetramitacao?idProposicao={id}"
 HEADERS = {
-    "User-Agent": "LexTimeline/2.0 (projeto academico; dados publicos da Camara dos Deputados)",
-    "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/2.1; +https://github.com/GPE-CD/LexTimeline)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.7",
 }
 
 # Paleta fixa por órgão. Mantém consistência entre diferentes PLs.
@@ -123,6 +125,19 @@ def normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def strip_accents(text: str) -> str:
+    """Normalize text for marker detection while preserving original text elsewhere."""
+    text = text or ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return normalize_spaces(text).lower()
+
+
+def marker_contains(line: str, *terms: str) -> bool:
+    n = strip_accents(line)
+    return all(strip_accents(t) in n for t in terms)
+
+
 def parse_br_date(s: str) -> date:
     return datetime.strptime(s.strip(), "%d/%m/%Y").date()
 
@@ -195,34 +210,66 @@ def extract_basic_info(soup: BeautifulSoup) -> Tuple[str, str]:
 
 
 def get_tramitacao_lines(soup: BeautifulSoup) -> List[str]:
-    """Extract text lines from the official Tramitação section of the ficha."""
+    """Extract text lines from the official Tramitação section of the ficha.
+
+    The Câmara page is not always rendered with the same line breaks in all
+    environments. This function therefore uses a hierarchy of conservative
+    markers and, if necessary, falls back to scanning the whole official ficha
+    for date + órgão patterns. It does not create or infer dates; it only makes
+    the extraction of already printed table lines more tolerant.
+    """
     all_lines = [normalize_spaces(x) for x in soup.get_text("\n").splitlines()]
     lines = [x for x in all_lines if x]
 
-    # Prefer start immediately after "Data Andamento" following the "Tramitação" heading.
+    def is_data_andamento(x: str) -> bool:
+        n = strip_accents(x)
+        return n == "data andamento" or ("data" in n and "andamento" in n and len(n) <= 40)
+
+    def is_tramitacao_heading(x: str) -> bool:
+        n = strip_accents(x)
+        # Handles "Tramitação", "Tramitação Cadastrar para acompanhamento" etc.
+        return "tramitacao" in n and "informacoes de tramitacao" not in n and "regime de tramitacao" not in n
+
     start = None
-    tram_indices = [i for i, x in enumerate(lines) if x == "Tramitação"]
-    data_indices = [i for i, x in enumerate(lines) if x == "Data Andamento"]
+
+    # 1) Best marker: explicit "Data Andamento", preferably after the Tramitação heading.
+    tram_indices = [i for i, x in enumerate(lines) if is_tramitacao_heading(x)]
+    data_indices = [i for i, x in enumerate(lines) if is_data_andamento(x)]
     for di in data_indices:
-        if any(ti < di for ti in tram_indices):
+        if not tram_indices or any(ti <= di for ti in tram_indices):
             start = di + 1
             break
-    if start is None:
-        # Some versions include “Data Andamento” without a clean heading.
-        for i, x in enumerate(lines):
-            if x == "Data Andamento":
-                start = i + 1
-                break
-    if start is None:
-        raise ValueError("Não localizei a seção 'Tramitação' / 'Data Andamento' na ficha oficial.")
 
-    end_markers = {
-        "Versões para impressão", "Notícias", "Sessões e Reuniões", "Discursos",
-        "Informações Externas", "57ª Legislatura", "56ª Legislatura", "55ª Legislatura",
-    }
+    # 2) Official observation immediately before the table.
+    if start is None:
+        for i, x in enumerate(lines):
+            if marker_contains(x, "o andamento da proposicao fora desta casa legislativa"):
+                start = i + 1
+                # If the next line is "Data Andamento", skip it too.
+                if start < len(lines) and is_data_andamento(lines[start]):
+                    start += 1
+                break
+
+    # 3) Fallback: after the last heading that looks like Tramitação.
+    if start is None and tram_indices:
+        start = tram_indices[-1] + 1
+        if start < len(lines) and is_data_andamento(lines[start]):
+            start += 1
+
+    # 4) Last-resort fallback: scan the whole official ficha. This is safer than
+    # failing, because later extraction still requires a date followed by an órgão.
+    if start is None:
+        start = 0
+
+    end_markers_norm = [
+        "versoes para impressao", "noticias", "sessoes e reunioes", "discursos",
+        "informacoes externas", "camara dos deputados -", "disque-camara",
+        "sobre o portal", "termos de uso", "aplicativos",
+    ]
     end = len(lines)
     for j in range(start, len(lines)):
-        if lines[j] in end_markers or lines[j].startswith("Câmara dos Deputados -"):
+        n = strip_accents(lines[j])
+        if any(n.startswith(m) or n == m for m in end_markers_norm):
             end = j
             break
     return lines[start:end]
@@ -236,6 +283,7 @@ def extract_raw_events(lines: List[str]) -> List[RawEvent]:
         if not DATE_RE.match(line):
             i += 1
             continue
+        date_line_index = i
         date_label_full = line
         event_date = parse_br_date(line)
         i += 1
@@ -278,7 +326,7 @@ def extract_raw_events(lines: List[str]) -> List[RawEvent]:
                 sigla=sigla,
                 orgao_nome=orgao_nome,
                 text=event_text,
-                line_index=i,
+                line_index=date_line_index,
             )
         )
         i = k
@@ -288,6 +336,18 @@ def extract_raw_events(lines: List[str]) -> List[RawEvent]:
 def is_initial_presentation(event: RawEvent, is_first_date: bool) -> bool:
     txt = event.text.lower()
     return event.sigla == "MESA" and is_first_date and ("apresentação do pl" in txt or "apresentacao do pl" in txt or "apresentação do projeto" in txt or "projeto de lei" in txt)
+
+
+def is_initial_presentation_any_org(event: RawEvent, is_first_date: bool) -> bool:
+    """Some propositions show the first presentation under PLEN instead of MESA."""
+    txt = event.text.lower()
+    return is_first_date and (
+        "apresentação do pl" in txt
+        or "apresentacao do pl" in txt
+        or "apresentação do projeto" in txt
+        or "apresentacao do projeto" in txt
+        or "projeto de lei" in txt
+    )
 
 
 def is_accessory_mesa(event: RawEvent, first_date: Optional[date]) -> bool:
@@ -309,7 +369,7 @@ def looks_effective(event: RawEvent, previous_sigla: Optional[str], first_date: 
 
     if sigla in ACCESSORY_ORGS:
         return False
-    if is_initial_presentation(event, bool(first_date and event.date == first_date)):
+    if is_initial_presentation_any_org(event, bool(first_date and event.date == first_date)):
         return True
     if sigla == "MESA":
         return False
@@ -367,7 +427,7 @@ def looks_effective(event: RawEvent, previous_sigla: Optional[str], first_date: 
 def summarize_marco(event: RawEvent) -> str:
     txt = event.text
     low = txt.lower()
-    if event.sigla == "MESA" and ("apresentação do pl" in low or "projeto de lei" in low):
+    if "apresentação do pl" in low or "apresentacao do pl" in low or "apresentação do projeto" in low or "projeto de lei" in low:
         return "Apresentação do projeto"
     if "aprovado o requerimento" in low and ("urgência" in low or "urgencia" in low):
         return "Aprovado o requerimento de urgência e alterado o regime de tramitação"
@@ -399,6 +459,21 @@ def summarize_marco(event: RawEvent) -> str:
     return clean or "Marco de tramitação oficial"
 
 
+def dedupe_and_sort_events(events: List[RawEvent]) -> List[RawEvent]:
+    """Remove duplicated events accidentally captured outside the Tramitação table
+    and sort by official date while preserving same-day page order.
+    """
+    seen = set()
+    deduped: List[RawEvent] = []
+    for e in events:
+        key = (e.date.isoformat(), e.sigla, normalize_spaces(e.text)[:220])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(e)
+    return sorted(deduped, key=lambda e: (e.date, e.line_index))
+
+
 def select_marcos(events: List[RawEvent]) -> Tuple[List[Marco], int, List[str]]:
     if not events:
         return [], 0, ["Nenhum evento foi extraído da seção Tramitação."]
@@ -423,19 +498,19 @@ def select_marcos(events: List[RawEvent]) -> Tuple[List[Marco], int, List[str]]:
         else:
             excluded += 1
 
-    # If the first effective event after exclusions is not the initial presentation but there is a clear MESA presentation, prepend it.
+    # If the first effective event after exclusions is not the initial presentation but there is a clear presentation, prepend it.
     if marcos:
-        first_mesa = next((e for e in events if is_initial_presentation(e, e.date == first_date)), None)
-        if first_mesa and marcos[0].date != first_mesa.date:
+        first_presentation = next((e for e in events if is_initial_presentation_any_org(e, e.date == first_date)), None)
+        if first_presentation and marcos[0].date != first_presentation.date:
             marcos.insert(
                 0,
                 Marco(
-                    date=first_mesa.date,
-                    date_label=fmt_date(first_mesa.date),
-                    sigla="MESA",
-                    orgao_nome=first_mesa.orgao_nome or "Mesa Diretora",
+                    date=first_presentation.date,
+                    date_label=fmt_date(first_presentation.date),
+                    sigla=first_presentation.sigla,
+                    orgao_nome=first_presentation.orgao_nome or DEFAULT_ORGAO_NAMES.get(first_presentation.sigla, first_presentation.sigla),
                     descricao="Apresentação do projeto",
-                    raw_text=first_mesa.text,
+                    raw_text=first_presentation.text,
                 ),
             )
 
@@ -710,7 +785,9 @@ def analyze_pl(raw_input: str) -> TimelineResult:
     soup = BeautifulSoup(ficha_html, "html.parser")
     situacao, ementa = extract_basic_info(soup)
     lines = get_tramitacao_lines(soup)
-    raw_events = extract_raw_events(lines)
+    raw_events = dedupe_and_sort_events(extract_raw_events(lines))
+    if not raw_events:
+        raise ValueError("Não extraí eventos oficiais de tramitação no padrão data + órgão. A ficha pode ter sido carregada de forma incompleta; tente colar a URL da ficha oficial ou repetir a consulta.")
     marcos, excluded_count, warnings = select_marcos(raw_events)
     terminal_date, terminal_note = choose_terminal_date(raw_events, marcos, situacao)
 
