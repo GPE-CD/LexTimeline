@@ -654,13 +654,39 @@ def compute_segment_widths(days: List[int], total_width: int, min_width: int = 1
     return [w * factor for w in widths]
 
 
+def estimate_rotated_span(text: str, font_size: int = 22, angle_deg: int = 28) -> float:
+    """Approximate horizontal span occupied by a rotated label anchored at its start."""
+    if not text:
+        return 0.0
+    # Empirical approximation suitable for SVG labels in this panel.
+    return max(28.0, len(text) * font_size * 0.50)
+
+
+def assign_label_levels(xs: List[float], texts: List[str], *, font_size: int, angle_deg: int, min_gap: float = 8.0, max_levels: int = 4) -> List[int]:
+    """Assign staggered levels so rotated labels/dates do not overlap horizontally."""
+    level_end = [-1e9] * max_levels
+    assigned: List[int] = []
+    for x, text in zip(xs, texts):
+        span = estimate_rotated_span(text, font_size=font_size, angle_deg=angle_deg)
+        chosen = None
+        for lvl in range(max_levels):
+            if x >= level_end[lvl] + min_gap:
+                chosen = lvl
+                break
+        if chosen is None:
+            # Reuse the least-colliding level.
+            chosen = min(range(max_levels), key=lambda lvl: level_end[lvl])
+        assigned.append(chosen)
+        level_end[chosen] = x + span
+    return assigned
+
+
 def render_svg(result: TimelineResult) -> str:
     marcos = result.marcos
     terminal = result.terminal_date
     if not marcos:
         return ""
 
-    # SVG geometry.
     W = 1490
     margin_x = 55
     title_y = 60
@@ -671,7 +697,6 @@ def render_svg(result: TimelineResult) -> str:
     row_h_base = 44
     header_h = 48
 
-    # Build table rows with dynamic heights.
     table_rows = []
     for m in marcos:
         desc_lines = wrap_svg_text(m.descricao, 72)
@@ -680,22 +705,38 @@ def render_svg(result: TimelineResult) -> str:
     table_y = 130
     table_h = header_h + sum(row[2] for row in table_rows)
 
-    timeline_y = table_y + table_h + 100
+    timeline_y = table_y + table_h + 95
     bar_x = margin_x
-    bar_y = timeline_y + 30
+    bar_y = timeline_y + 60
     bar_w = W - 2 * margin_x
-    bar_h = 66
-    label_y = bar_y - 28
-    date_y = bar_y + bar_h + 35
+    bar_h = 68
 
-    # Segment dates and widths.
     starts = [m.date for m in marcos]
     ends = [marcos[i + 1].date for i in range(len(marcos) - 1)] + [terminal]
     days = [max((e - s).days, 0) for s, e in zip(starts, ends)]
     widths = compute_segment_widths(days, bar_w, min_width=16)
 
-    legend_y = date_y + 90
-    # unique orgs in order.
+    start_xs: List[float] = []
+    x = bar_x
+    for w in widths:
+        start_xs.append(x)
+        x += w
+
+    label_texts = [f"/{m.sigla}" for m in marcos]
+    label_levels = assign_label_levels(start_xs, label_texts, font_size=22, angle_deg=28, min_gap=10.0, max_levels=4)
+    label_gap = 24
+    label_base_y = bar_y - 18
+    max_label_level = max(label_levels) if label_levels else 0
+
+    date_xs = start_xs + [bar_x + bar_w - 4]
+    date_texts = [m.date_label for m in marcos] + [result.terminal_label]
+    date_levels = assign_label_levels(date_xs, date_texts, font_size=19, angle_deg=45, min_gap=8.0, max_levels=4)
+    date_gap = 24
+    date_base_y = bar_y + bar_h + 56
+    max_date_level = max(date_levels) if date_levels else 0
+
+    legend_y = date_base_y + max_date_level * date_gap + 88
+
     org_order: List[str] = []
     org_names: Dict[str, str] = {}
     for m in marcos:
@@ -703,29 +744,34 @@ def render_svg(result: TimelineResult) -> str:
             org_order.append(m.sigla)
             org_names[m.sigla] = m.orgao_nome or DEFAULT_ORGAO_NAMES.get(m.sigla, m.sigla)
 
-    # Legend layout: two columns if many.
     legend_items = []
-    legend_col_w = 470
+    legend_col_w = 640
     for idx, sigla in enumerate(org_order):
         col = idx % 2
         row = idx // 2
-        lx = 120 + col * legend_col_w
-        ly = legend_y + row * 42
+        lx = 110 + col * legend_col_w
+        ly = legend_y + row * 48
         legend_items.append((sigla, lx, ly))
-    legend_h = max(1, ((len(org_order) + 1) // 2)) * 42
-    note_y = legend_y + legend_h + 55
-    H = note_y + 90
+    legend_h = max(1, ((len(org_order) + 1) // 2)) * 48
+    note_title_y = legend_y + legend_h + 62
+    note_text_y = note_title_y + 30
+
+    note = "Critério: foram considerados apenas marcos de efetiva tramitação por órgão. Registros acessórios de MESA e CCP não foram incluídos, salvo a etapa inicial de apresentação do projeto."
+    if "em curso" in result.terminal_note.lower():
+        note += " O último segmento foi considerado em curso até a data da análise."
+    note_lines = wrap_svg_text(note, 118)
+    note_h = len(note_lines) * 26
+    H = note_text_y + note_h + 40
 
     parts: List[str] = []
     parts.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">')
     parts.append('<rect width="100%" height="100%" fill="#ffffff"/>')
-    parts.append('<style>text{font-family:Arial, Helvetica, sans-serif;} .title{font-size:44px;font-weight:800;fill:#061833;} .sub{font-size:24px;fill:#1f2937;} .head{font-size:24px;font-weight:700;fill:#fff;} .cell{font-size:22px;fill:#111827;} .small{font-size:20px;fill:#111827;} .label{font-size:24px;font-weight:800;font-style:italic;} .date{font-size:22px;fill:#111827;} .note{font-size:21px;fill:#111827;} .noteB{font-size:21px;font-weight:800;fill:#111827;}</style>')
+    parts.append('<style>text{font-family:Arial, Helvetica, sans-serif;} .title{font-size:44px;font-weight:800;fill:#061833;} .sub{font-size:24px;fill:#1f2937;} .head{font-size:24px;font-weight:700;fill:#fff;} .cell{font-size:22px;fill:#111827;} .small{font-size:20px;fill:#111827;} .label{font-size:22px;font-weight:800;font-style:italic;} .date{font-size:19px;fill:#111827;} .note{font-size:20px;fill:#111827;} .noteB{font-size:21px;font-weight:800;fill:#111827;}</style>')
 
     parts.append(f'<text x="{W/2}" y="{title_y}" text-anchor="middle" class="title">LexTimeline — Painel de Tramitação Legislativa</text>')
     subtitle = f'{result.input_label} — timeline visual da tramitação (marcos oficiais da Câmara dos Deputados)'
     parts.append(f'<text x="{W/2}" y="{subtitle_y}" text-anchor="middle" class="sub">{escape(subtitle)}</text>')
 
-    # Table background and header.
     parts.append(f'<rect x="{table_x}" y="{table_y}" width="{table_w}" height="{table_h}" fill="#ffffff" stroke="#6b7280" stroke-width="1"/>')
     parts.append(f'<rect x="{table_x}" y="{table_y}" width="{table_w}" height="{header_h}" fill="#061d3a"/>')
     x1 = table_x + col_w[0]
@@ -751,49 +797,41 @@ def render_svg(result: TimelineResult) -> str:
         y += rh
     parts.append(f'<line x1="{table_x}" y1="{table_y+table_h}" x2="{table_x+table_w}" y2="{table_y+table_h}" stroke="#6b7280"/>')
 
-    # Timeline segments.
     x = bar_x
-    boundary_positions = [bar_x]
     for idx, (m, w) in enumerate(zip(marcos, widths)):
         color = get_color(m.sigla)
-        # no gaps. Rounded corners only at ends.
         rx = 6 if idx == 0 or idx == len(marcos) - 1 else 0
         parts.append(f'<rect x="{x:.2f}" y="{bar_y}" width="{w:.2f}" height="{bar_h}" fill="{color}" rx="{rx}" ry="{rx}"/>')
-        label_color = color
-        # Place label above segment start, slanted right; use slash and sigla.
-        parts.append(f'<text x="{x+8:.2f}" y="{label_y}" class="label" fill="{label_color}" transform="rotate(-28 {x+8:.2f} {label_y})">/{escape(m.sigla)}</text>')
-        # Date under segment boundary.
-        parts.append(f'<text x="{x+4:.2f}" y="{date_y}" class="date" transform="rotate(-45 {x+4:.2f} {date_y})">{m.date_label}</text>')
+        lx = x + 8
+        ly = label_base_y - label_levels[idx] * label_gap
+        parts.append(f'<text x="{lx:.2f}" y="{ly:.2f}" class="label" fill="#111827" transform="rotate(-28 {lx:.2f} {ly:.2f})">/{escape(m.sigla)}</text>')
+        dx = x + 4
+        dy = date_base_y + date_levels[idx] * date_gap
+        parts.append(f'<text x="{dx:.2f}" y="{dy:.2f}" class="date" transform="rotate(-45 {dx:.2f} {dy:.2f})">{m.date_label}</text>')
         x += w
-        boundary_positions.append(x)
-    # Final date at far right.
-    parts.append(f'<text x="{bar_x+bar_w-4}" y="{date_y}" text-anchor="end" class="date" transform="rotate(-45 {bar_x+bar_w-4} {date_y})">{result.terminal_label}</text>')
 
-    # Legend.
+    final_dx = bar_x + bar_w - 4
+    final_dy = date_base_y + date_levels[-1] * date_gap
+    parts.append(f'<text x="{final_dx:.2f}" y="{final_dy:.2f}" text-anchor="end" class="date" transform="rotate(-45 {final_dx:.2f} {final_dy:.2f})">{result.terminal_label}</text>')
+
     for sigla, lx, ly in legend_items:
         color = get_color(sigla)
         name = org_names.get(sigla) or DEFAULT_ORGAO_NAMES.get(sigla, sigla)
         label = f"{sigla} — {name}"
-        lines = wrap_svg_text(label, 52)
+        lines = wrap_svg_text(label, 44)
         parts.append(f'<rect x="{lx}" y="{ly-20}" width="48" height="28" rx="4" fill="{color}"/>')
         parts.append(f'<text x="{lx+68}" y="{ly}" class="small">')
         for j, line in enumerate(lines):
             dy = 0 if j == 0 else 24
-            # Bold sigla not easily mixed; use simple text.
             parts.append(f'<tspan x="{lx+68}" dy="{dy}">{escape(line)}</tspan>')
         parts.append('</text>')
 
-    # Note.
-    parts.append(f'<line x1="{margin_x}" y1="{note_y-30}" x2="{W-margin_x}" y2="{note_y-30}" stroke="#9ca3af"/>')
-    note = "Critério: foram considerados apenas marcos de efetiva tramitação por órgão. Registros acessórios de MESA e CCP não foram incluídos, salvo a etapa inicial de apresentação do projeto."
-    if "em curso" in result.terminal_note.lower():
-        note += " O último segmento foi considerado em curso até a data da análise."
-    note_lines = wrap_svg_text(note, 115)
-    parts.append(f'<text x="{margin_x+25}" y="{note_y}" class="noteB">Nota metodológica:</text>')
-    parts.append(f'<text x="{margin_x+230}" y="{note_y}" class="note">')
+    parts.append(f'<line x1="{margin_x}" y1="{note_title_y-28}" x2="{W-margin_x}" y2="{note_title_y-28}" stroke="#9ca3af"/>')
+    parts.append(f'<text x="{margin_x+25}" y="{note_title_y}" class="noteB">Nota metodológica:</text>')
+    parts.append(f'<text x="{margin_x+25}" y="{note_text_y}" class="note">')
     for j, line in enumerate(note_lines):
         dy = 0 if j == 0 else 26
-        parts.append(f'<tspan x="{margin_x+230}" dy="{dy}">{escape(line)}</tspan>')
+        parts.append(f'<tspan x="{margin_x+25}" dy="{dy}">{escape(line)}</tspan>')
     parts.append('</text>')
 
     parts.append('</svg>')
@@ -887,7 +925,7 @@ def render_result(result: TimelineResult):
       <img src="{svg_uri}" style="width:100%; min-width:1100px; height:auto; display:block;" />
     </div>
     """
-    st.components.v1.html(html_block, height=820, scrolling=True)
+    st.components.v1.html(html_block, height=980, scrolling=True)
 
     st.download_button(
         "Baixar painel em SVG",
