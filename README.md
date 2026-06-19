@@ -1,47 +1,53 @@
 # LexTimeline — Painel de Tramitação Legislativa
 
-Aplicativo Streamlit para gerar timeline visual proporcional da tramitação de Projetos de Lei na Câmara dos Deputados.
+Aplicativo Streamlit para gerar timeline visual proporcional da tramitação de Projetos de Lei da Câmara dos Deputados, usando metodologia estrita baseada na seção **Tramitação** da ficha oficial da proposição.
 
-## Versão 2.1
+## Versão 3.0
 
-Esta versão corrige a extração da seção **Tramitação** da ficha oficial da Câmara quando o HTML chega ao Streamlit com quebras de linha diferentes. A aplicação continua usando metodologia estrita: não inventa datas, não estima períodos e não reconstrói tramitação por heurística externa.
+Esta versão elimina a dependência obrigatória da API dos Dados Abertos para localizar o PL. O app prioriza a ficha oficial da Câmara (`proposicoesWeb/fichadetramitacao`) e usa:
+
+1. URL direta da ficha, quando fornecida pelo usuário;
+2. `idProposicao`, quando fornecido pelo usuário;
+3. cache interno para os PLs usados na demonstração do projeto;
+4. busca pública no portal da Câmara como tentativa auxiliar para localizar a ficha.
+
+A análise da tramitação é sempre feita sobre a seção oficial **Tramitação** da ficha da Câmara.
 
 ## Metodologia
 
-A aplicação usa a ficha oficial da Câmara (`proposicoesWeb/fichadetramitacao`) e extrai os registros da seção **Tramitação**. São considerados apenas marcos de efetiva tramitação por órgão.
+O aplicativo considera apenas marcos de efetiva tramitação por órgão. Registros acessórios de MESA e CCP são excluídos, salvo a etapa inicial de apresentação do projeto.
 
-Registros acessórios de **MESA** e **CCP** não são usados como segmentos próprios, salvo a etapa inicial de apresentação do projeto quando registrada na Mesa Diretora.
+A timeline gerada contém:
 
-## Arquivos
-
-Suba apenas estes arquivos para o repositório GitHub:
-
-- `app.py`
-- `requirements.txt`
-- `README.md`
-
-Não há necessidade de pasta `data/` nem de pasta `.streamlit/`.
-
-## Como publicar no Streamlit Community Cloud
-
-1. Acesse https://share.streamlit.io
-2. Faça login com GitHub.
-3. Escolha o repositório `GPE-CD/LexTimeline`.
-4. Em **Main file path**, informe `app.py`.
-5. Clique em **Deploy**.
-
-## Exemplos de teste
-
-- `PL 5875/2013`
-- `PL 5688/2023`
-
-## Saída visual
-
-A aplicação gera um painel em SVG com:
-
-- tabela dos marcos considerados;
-- barra horizontal contínua, espessa e proporcional;
-- rótulos dos órgãos inclinados acima da barra;
+- tabela de marcos considerados;
+- barra horizontal contínua e espessa;
+- cores fixas por órgão;
+- siglas inclinadas acima da barra;
 - datas inclinadas abaixo da barra;
 - legenda de cores;
 - nota metodológica.
+
+## Arquivos
+
+- `app.py`: aplicação principal;
+- `requirements.txt`: dependências;
+- `README.md`: documentação.
+
+## Publicação no Streamlit
+
+No Streamlit Community Cloud, configure:
+
+- Repository: `GPE-CD/LexTimeline`
+- Branch: `main`
+- Main file path: `app.py`
+
+Depois clique em **Deploy** ou, se estiver atualizando versão, em **Reboot app**.
+
+## Exemplos de entrada
+
+```text
+PL 5875/2013
+PL 5688/2023
+```
+
+Também é possível colar diretamente a URL da ficha oficial da Câmara ou informar o `idProposicao`.

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 LexTimeline — Painel de Tramitação Legislativa
-Versão 2.2: metodologia estrita baseada na seção oficial "Tramitação" da ficha da Câmara, com correção de resposta JSON da API.
+Versão 3.0: metodologia estrita baseada na seção oficial "Tramitação" da ficha da Câmara, sem dependência obrigatória da API dos Dados Abertos para localizar o PL.
 
 Desenvolvido para uso em Streamlit Community Cloud.
 """
@@ -28,19 +28,28 @@ st.set_page_config(
     layout="wide",
 )
 
-CAMARA_API = "https://dadosabertos.camara.leg.br/api/v2"
 FICHA_URL = "https://www.camara.leg.br/proposicoesWeb/fichadetramitacao?idProposicao={id}"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/2.2; +https://github.com/GPE-CD/LexTimeline)",
+    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/3.0; +https://github.com/GPE-CD/LexTimeline)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.7",
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.7",
 }
 
-API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/2.2; +https://github.com/GPE-CD/LexTimeline)",
-    "Accept": "application/json",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.7",
+# Cache interno de IDs oficiais usados no projeto/demonstração.
+# Ele evita depender da API dos Dados Abertos apenas para descobrir o idProposicao.
+# A análise da tramitação continua sendo feita exclusivamente na ficha oficial da Câmara.
+KNOWN_PL_IDS: Dict[Tuple[str, str], str] = {
+    ("5875", "2013"): "582806",
+    ("5688", "2023"): "2406422",
+    ("2630", "2020"): "2256735",
 }
+
+CAMARA_SEARCH_URLS = [
+    "https://www.camara.leg.br/busca-portal/proposicoes/pesquisa-simplificada?termo={query}",
+    "https://www.camara.leg.br/busca-portal/proposicoes?termo={query}",
+    "https://www.camara.leg.br/busca-portal?termo={query}",
+]
+
 
 # Paleta fixa por órgão. Mantém consistência entre diferentes PLs.
 ORGAO_COLORS: Dict[str, str] = {
@@ -159,74 +168,91 @@ def safe_get(url: str, *, params: Optional[dict] = None, timeout: int = 30) -> r
     return resp
 
 
-def safe_get_api_json(url: str, *, params: Optional[dict] = None, timeout: int = 30) -> dict:
-    """Request JSON from Dados Abertos without assuming the response is JSON.
+def safe_get_text(url: str, *, params: Optional[dict] = None, timeout: int = 25) -> str:
+    """Fetch HTML/text without assuming JSON.
 
-    The earlier app used the same Accept header for HTML and API calls. In some
-    deployments this may cause an empty or non-JSON response, leading to the
-    error: "Expecting value: line 1 column 1 (char 0)". This function requests
-    JSON explicitly and raises an explanatory error if the body is not JSON.
+    The app deliberately avoids using the Dados Abertos API as a mandatory
+    locator. It works from the official ficha page and treats the public search
+    pages only as optional locators when the user does not provide an id or URL.
     """
-    resp = requests.get(url, params=params, headers=API_HEADERS, timeout=timeout)
+    resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
     resp.raise_for_status()
-    body = (resp.text or "").strip()
-    if not body:
-        raise ValueError("A API dos Dados Abertos retornou resposta vazia ao localizar a proposição.")
-    ctype = (resp.headers.get("content-type") or "").lower()
-    try:
-        return resp.json()
-    except (json.JSONDecodeError, ValueError) as exc:
-        preview = body[:180].replace("\n", " ")
-        raise ValueError(
-            "A API dos Dados Abertos não retornou JSON ao localizar a proposição. "
-            f"Content-Type: {ctype or 'não informado'}. Prévia da resposta: {preview!r}"
-        ) from exc
+    if not resp.encoding or resp.encoding.lower() in {"iso-8859-1", "latin-1"}:
+        resp.encoding = "utf-8"
+    return resp.text or ""
 
 
-def parse_pl_input(value: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Return (numero, ano, idProposicao). Accepts PL n/ano, n/ano, URL or raw id."""
-    value = (value or "").strip()
-    if not value:
-        return None, None, None
-    id_match = ID_RE.search(value)
-    if id_match:
-        return None, None, id_match.group(1)
-    if value.isdigit() and len(value) >= 6:
-        return None, None, value
-    match = PL_RE.search(value)
-    if match:
-        return match.group("num"), match.group("ano"), None
-    return None, None, None
+def extract_id_from_html_for_pl(html_text: str, numero: str, ano: str) -> Optional[str]:
+    """Conservatively extract an idProposicao from Câmara search HTML."""
+    if not html_text:
+        return None
+    candidates = []
+    # Find explicit ficha URLs.
+    for match in re.finditer(r"fichadetramitacao\?idProposicao=(\d+)", html_text):
+        start = max(0, match.start() - 500)
+        end = min(len(html_text), match.end() + 500)
+        context = html.unescape(html_text[start:end])
+        score = 0
+        if re.search(rf"PL\s*{re.escape(numero)}\s*/\s*{re.escape(ano)}", context, re.I):
+            score += 10
+        if numero in context and ano in context:
+            score += 3
+        candidates.append((score, match.group(1)))
+    # Also capture generic idProposicao references.
+    for match in re.finditer(r"idProposicao[=:%22'\s]+(\d+)", html_text):
+        start = max(0, match.start() - 500)
+        end = min(len(html_text), match.end() + 500)
+        context = html.unescape(html_text[start:end])
+        score = 0
+        if re.search(rf"PL\s*{re.escape(numero)}\s*/\s*{re.escape(ano)}", context, re.I):
+            score += 10
+        if numero in context and ano in context:
+            score += 3
+        candidates.append((score, match.group(1)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def find_id_proposicao(numero: str, ano: str) -> Tuple[str, str]:
-    """Find proposition id using Dados Abertos. Uses API only to locate the official ficha.
+    """Find proposition id without mandatory Dados Abertos API dependency.
 
-    The analytical data still comes from the official ficha de tramitação. The API
-    is used only as a locator.
+    Priority:
+    1. internal cache for known PLs used in the project;
+    2. public Câmara search pages, parsed for ficha links;
+    3. explicit error requesting URL or idProposicao.
     """
-    params = {"siglaTipo": "PL", "numero": numero, "ano": ano, "itens": 10, "ordem": "ASC"}
-    payload = safe_get_api_json(f"{CAMARA_API}/proposicoes", params=params)
-    data = payload.get("dados", []) if isinstance(payload, dict) else []
-    if not data:
-        raise ValueError(f"Não encontrei PL {numero}/{ano} nos Dados Abertos da Câmara.")
-    # Prefer exact sigla/numero/ano match.
-    for item in data:
-        if str(item.get("numero")) == str(numero) and str(item.get("ano")) == str(ano) and str(item.get("siglaTipo", "")).upper() == "PL":
-            return str(item.get("id")), f"PL {numero}/{ano}"
-    item = data[0]
-    return str(item.get("id")), f"{item.get('siglaTipo', 'PL')} {item.get('numero')}/{item.get('ano')}"
+    key = (str(int(numero)) if str(numero).isdigit() else str(numero), str(ano))
+    if key in KNOWN_PL_IDS:
+        return KNOWN_PL_IDS[key], f"PL {numero}/{ano}"
+
+    from urllib.parse import quote_plus
+    query = quote_plus(f"PL {numero}/{ano}")
+    last_error = None
+    for template in CAMARA_SEARCH_URLS:
+        url = template.format(query=query)
+        try:
+            text = safe_get_text(url, timeout=18)
+            found = extract_id_from_html_for_pl(text, numero, ano)
+            if found:
+                return found, f"PL {numero}/{ano}"
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    suffix = f" Último erro de busca: {last_error}" if last_error else ""
+    raise ValueError(
+        f"Não consegui localizar automaticamente a ficha do PL {numero}/{ano} no portal da Câmara.{suffix} "
+        "Cole a URL da ficha oficial ou informe diretamente o idProposicao."
+    )
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ficha_html(id_proposicao: str) -> str:
     url = FICHA_URL.format(id=id_proposicao)
-    resp = safe_get(url, timeout=40)
-    # Câmara normally returns UTF-8, but requests may guess latin in some situations.
-    if not resp.encoding or resp.encoding.lower() in {"iso-8859-1", "latin-1"}:
-        resp.encoding = "utf-8"
-    return resp.text
+    return safe_get_text(url, timeout=40)
 
 
 def extract_basic_info(soup: BeautifulSoup) -> Tuple[str, str]:
@@ -944,7 +970,7 @@ def main():
         <div style="padding: 10px 0 4px 0;">
           <h1 style="margin-bottom:0; color:#061833;">LexTimeline — Painel de Tramitação Legislativa</h1>
           <p style="font-size:1.05rem; color:#374151; margin-top:0.25rem;">
-            Timeline visual proporcional da tramitação de Projetos de Lei, baseada na seção oficial <b>Tramitação</b> da ficha da Câmara dos Deputados.
+            Timeline visual proporcional da tramitação de Projetos de Lei, baseada diretamente na seção oficial <b>Tramitação</b> da ficha da Câmara dos Deputados.
           </p>
         </div>
         """,
@@ -958,7 +984,7 @@ def main():
 
     with st.sidebar:
         st.header("Entrada")
-        st.caption("Informe um ou vários PLs, um por linha. Também é aceito colar uma URL da ficha da Câmara ou um idProposicao.")
+        st.caption("Informe um ou vários PLs, um por linha. O app prioriza a ficha oficial da Câmara. Também é aceito colar uma URL da ficha ou um idProposicao.")
         examples = "PL 5875/2013\nPL 5688/2023"
         user_input = st.text_area("Projetos de Lei", value=examples, height=120)
         run = st.button("Gerar timeline", type="primary")
@@ -986,7 +1012,7 @@ def main():
             render_result(result)
         except Exception as e:
             st.error(f"Falha ao consultar {raw}: {e}")
-            st.caption("Se o erro persistir, tente colar a URL da ficha da Câmara contendo idProposicao=... ou verificar se o PL existe na Câmara.")
+            st.caption("Se o erro persistir, cole a URL da ficha da Câmara contendo idProposicao=... ou informe diretamente o idProposicao.")
 
 
 if __name__ == "__main__":
