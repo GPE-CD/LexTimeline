@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 LexTimeline — Painel de Tramitação Legislativa
-Versão 3.0: metodologia estrita baseada na seção oficial "Tramitação" da ficha da Câmara, sem dependência obrigatória da API dos Dados Abertos para localizar o PL.
+Versão 3.1: metodologia estrita baseada na seção oficial "Tramitação" da ficha da Câmara, sem dependência obrigatória da API dos Dados Abertos para localizar o PL.
 
 Desenvolvido para uso em Streamlit Community Cloud.
 """
@@ -30,7 +30,7 @@ st.set_page_config(
 
 FICHA_URL = "https://www.camara.leg.br/proposicoesWeb/fichadetramitacao?idProposicao={id}"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/3.0; +https://github.com/GPE-CD/LexTimeline)",
+    "User-Agent": "Mozilla/5.0 (compatible; LexTimeline/3.1; +https://github.com/GPE-CD/LexTimeline)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.7",
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.7",
 }
@@ -160,6 +160,38 @@ def parse_br_date(s: str) -> date:
 
 def fmt_date(d: date) -> str:
     return d.strftime("%d/%m/%y")
+
+
+def parse_pl_input(value: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Interpreta a entrada do usuário.
+
+    Aceita:
+    - PL 5688/2023;
+    - 5688/2023;
+    - URL da ficha oficial contendo idProposicao=...;
+    - idProposicao numérico.
+    Retorna (numero, ano, idProposicao).
+    """
+    value = (value or "").strip()
+    if not value:
+        return None, None, None
+
+    id_match = ID_RE.search(value)
+    if id_match:
+        return None, None, id_match.group(1)
+
+    # idProposicao direto costuma ter 6 ou mais dígitos.
+    if value.isdigit() and len(value) >= 6:
+        return None, None, value
+
+    match = PL_RE.search(value)
+    if match:
+        numero = str(int(match.group("num"))) if match.group("num").isdigit() else match.group("num")
+        ano = match.group("ano")
+        return numero, ano, None
+
+    return None, None, None
+
 
 
 def safe_get(url: str, *, params: Optional[dict] = None, timeout: int = 30) -> requests.Response:

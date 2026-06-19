@@ -2,7 +2,7 @@
 
 Aplicativo Streamlit para gerar timeline visual proporcional da tramitação de Projetos de Lei da Câmara dos Deputados, usando metodologia estrita baseada na seção **Tramitação** da ficha oficial da proposição.
 
-## Versão 3.0
+## Versão 3.1
 
 Esta versão elimina a dependência obrigatória da API dos Dados Abertos para localizar o PL. O app prioriza a ficha oficial da Câmara (`proposicoesWeb/fichadetramitacao`) e usa:
 
@@ -51,3 +51,8 @@ PL 5688/2023
 ```
 
 Também é possível colar diretamente a URL da ficha oficial da Câmara ou informar o `idProposicao`.
+
+
+## Ajuste v3.1
+
+Correção da função de interpretação de entrada (`PL número/ano`, URL da ficha ou `idProposicao`), mantendo a análise baseada na ficha oficial da Câmara.
